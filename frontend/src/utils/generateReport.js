@@ -75,8 +75,8 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
     // If multiple results, summarize the LATEST (first) one for the summary, or average?
     // Let's list all of them in a summary table.
 
-    const headers = ["Date", "Spread Area (Ha)", "Current Vol (TMC)", "Capacity @ 40m (TMC)"];
-    const colWidths = [40, 40, 45, 50];
+    const headers = ["Date", "Spread Area (Ha)", "Volume @ Base (TMC)"];
+    const colWidths = [50, 60, 60];
     let startX = margin;
 
     // Table Header
@@ -103,10 +103,15 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
             currentX = startX + 2;
             const date = res.date || `Dataset ${index + 1}`;
             const area = `${res.area_ha}`;
-            const vol = `${res.volume_tmc}`;
-            const cap = res.volume_at_level_tmc ? `${res.volume_at_level_tmc}` : "-";
+            // User requested: "only area and capacity @40 as volume"
+            // So we show "volume_at_level_tmc" as the Volume column if available, 
+            // otherwise fallback to calculated volume if they didn't provide base level.
+            // But context implies they want the "Capacity" value there.
+            const vol = res.volume_at_level_tmc
+                ? `${res.volume_at_level_tmc}`
+                : `${res.volume_tmc}`;
 
-            const rowData = [date, area, vol, cap];
+            const rowData = [date, area, vol];
 
             // Alternating row color
             if (index % 2 === 1) {
@@ -125,45 +130,81 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
     cursorY += 15;
 
     // 5. Chart Snapshot (If visible)
-    try {
-        const chartElement = document.querySelector("#trend-chart");
-        if (chartElement) {
-            cursorY = addSectionHeader("Temporal Trend Analysis", cursorY);
+    // 5. Chart Snapshot (If visible)
+    // We now have two charts: #area-chart and #volume-chart
+    // 5. Chart Snapshot (If visible)
+    // 5. Chart Snapshot (If visible)
+    const captureChart = async (id, title) => {
+        const element = document.querySelector(id);
+        if (element) {
 
-            const canvas = await html2canvas(chartElement, {
-                scale: 2,
-                backgroundColor: "#0f172a" // Match dark theme or force white? Dark is cool.
-            });
-            const imgData = canvas.toDataURL("image/png");
-
-            // Fit width
-            const imgWidth = pageWidth - (2 * margin);
-            const imgHeight = (canvas.height * imgWidth) / canvas.width;
-
-            // Check if page break needed
-            if (cursorY + imgHeight > pageHeight - margin) {
+            // Check page break
+            if (cursorY + 70 > pageHeight - margin) {
                 doc.addPage();
                 cursorY = margin + 10;
             }
+            cursorY = addSectionHeader(title, cursorY);
 
-            doc.addImage(imgData, 'PNG', margin, cursorY, imgWidth, imgHeight);
-            cursorY += imgHeight + 10;
+            try {
+                // DIRECT CAPTURE STRATEGY:
+                // Modify the ACTUAL element temporarily to ensure it captures well.
+                // We save original styles to restore later.
+                const originalBackground = element.style.background;
+                const originalBorder = element.style.borderRadius;
+
+                // Force solid background for capture (Dark Mode friendly)
+                element.style.background = '#0f172a';
+                element.style.borderRadius = '0'; // Sharp corners for PDF
+
+                // Wait a moment for style repaint
+                await new Promise(r => setTimeout(r, 200));
+
+                const canvas = await html2canvas(element, {
+                    scale: 2,
+                    backgroundColor: "#0f172a",
+                    useCORS: true,
+                    logging: false,
+                    ignoreElements: (node) => node.tagName === 'NOSCRIPT'
+                });
+
+                // Restore original styles
+                element.style.background = originalBackground;
+                element.style.borderRadius = originalBorder;
+
+                const imgData = canvas.toDataURL("image/png");
+                const imgWidth = pageWidth - (2 * margin);
+                const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+                doc.addImage(imgData, 'PNG', margin, cursorY, imgWidth, imgHeight);
+                cursorY += imgHeight + 10;
+            } catch (e) {
+                console.warn(`Failed to capture chart ${id}`, e);
+            }
         }
-    } catch (e) {
-        console.warn("Chart capture failed", e);
-    }
+    };
+
+    await captureChart("#area-chart", "Area Trends");
+    await captureChart("#volume-chart", "Volume Capacity Trends");
+
 
     // --- Footer ---
-    const addFooter = (pageNo) => {
+    // --- Footer & Watermark ---
+    const addFooterAndWatermark = (pageNo) => {
+        // Watermark (Center, 36% Opacity)
+        doc.setGState(new doc.GState({ opacity: 0.36 }));
+        doc.addImage("/Logo.png", "PNG", (pageWidth - 80) / 2, (pageHeight - 80) / 2, 80, 80);
+        doc.setGState(new doc.GState({ opacity: 1.0 })); // Reset opacity
+
+        // Footer
         doc.setFontSize(8);
         doc.setTextColor(150);
         doc.text(`Generated by NeerPariksha AI | Page ${pageNo}`, margin, pageHeight - 10);
     };
-    addFooter(1);
+
     const pageCount = doc.getNumberOfPages();
-    for (let i = 2; i <= pageCount; i++) {
+    for (let i = 1; i <= pageCount; i++) {
         doc.setPage(i);
-        addFooter(i);
+        addFooterAndWatermark(i);
     }
 
     // Save

@@ -13,7 +13,7 @@ export default function ResultCard({ title, value, unit, icon: Icon, color = "cy
                 <div>
                     <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold mb-1">{title}</p>
                     <div className="flex items-baseline space-x-2">
-                        <span className="text-2xl font-bold text-white font-mono">{value}</span>
+                        <span className="text-2xl font-bold text-white font-mono">{value != null ? value : "-"}</span>
                         <span className="text-xs text-slate-500">{unit}</span>
                     </div>
                 </div>

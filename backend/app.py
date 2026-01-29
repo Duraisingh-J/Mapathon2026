@@ -62,55 +62,37 @@ async def analyze(
         dem_abs_path = dem_path
         print(f"[DEBUG] DEM saved to {dem_path}")
 
-    results = []
-
+    # Save all satellite images
+    sat_paths = []
+    
     for idx, sat_file in enumerate(satellite):
-        # Determine date for this image
-        if idx < len(date_list):
-            current_date_str = date_list[idx]
-        else:
-            # Fallback: Use today's date
-            # If multiple images have same date, pipeline might overwrite specific day files, 
-            # but usually fine for unique run_ids or different output filenames.
-            # To be safe, we might want to append index or something if needed, 
-            # but pipeline uses lake_id (run_id) + date. 
-            # Let's simple use today
-            current_date_str = str(date.today())
-
-        # Save Uploaded File
         sat_ext = os.path.splitext(sat_file.filename)[1]
-        # Unique filename per image
         sat_filename = f"{run_id}_sat_{idx}{sat_ext}"
         sat_path = os.path.join(UPLOAD_DIR, sat_filename)
         
         with open(sat_path, "wb") as f:
             shutil.copyfileobj(sat_file.file, f)
-            
-        print(f"[DEBUG] Processing Image {idx+1}/{len(satellite)}: {sat_filename} for date {current_date_str}")
+        
+        sat_paths.append(sat_path)
+    
+    print(f"[DEBUG] Processing {len(sat_paths)} images with dates: {date_list}")
 
-        try:
-            # Call Analysis Orchestrator
-            # Call Analysis Orchestrator
-            result = pipeline.analyze_lake(
-                sat_path=sat_path,
-                dem_path=dem_abs_path,
-                lake_id=f"{run_id}_{idx}", # Unique ID per image to prevent overwrite
-                date_str=current_date_str,
-                output_dir=OUTPUT_DIR,
-                base_level=base_level
-            )
-            
-            # Add date to result for frontend display
-            result["date"] = current_date_str
-            results.append(result)
-            
-        except Exception as e:
-            print(f"[ERROR] Processing {sat_filename} failed: {e}")
-            results.append({
-                "error": str(e), 
-                "filename": sat_filename,
-                "date": current_date_str
-            })
+    try:
+        # Call Analysis Orchestrator ONCE with list of paths
+        # dates string is passed directly
+        results = pipeline.analyze_lake(
+            image_paths=sat_paths,
+            dem_path=dem_abs_path,
+            lake_id=run_id,
+            date_string=dates, # Pass original string or joined list
+            output_dir=OUTPUT_DIR,
+            base_level=base_level
+        )
+        
+    except Exception as e:
+        print(f"[ERROR] Pipeline Analysis failed: {e}")
+        # Return a partial result or error structure that frontend can handle
+        return [{"error": str(e), "message": "Pipeline failed"}]
 
     print(f"[DEBUG] All processing done. Returning {len(results)} results.")
     return results

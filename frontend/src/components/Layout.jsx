@@ -58,8 +58,17 @@ export default function Layout({ children, activeTab, onNavigate }) {
             <div className="flex-1 flex flex-col h-full overflow-hidden relative">
                 {/* Slim Header */}
                 <header className="h-16 bg-slate-900/50 border-b border-slate-800 flex items-center justify-between px-8 backdrop-blur-md z-10">
-                    <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-widest">
-                        Project: <span className="text-white">{title}</span>
+                    <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-widest flex items-center">
+                        Project:
+                        <input
+                            value={title}
+                            title="Click to rename project"
+                            onChange={(e) => {
+                                setTitle(e.target.value);
+                                localStorage.setItem("neer_project_name", e.target.value);
+                            }}
+                            className="ml-2 bg-slate-900/50 text-white font-semibold placeholder-slate-600 border border-slate-700 hover:border-cyan-500 focus:border-cyan-400 focus:outline-none focus:ring-1 focus:ring-cyan-500/50 transition-all w-72 px-3 py-1 rounded text-sm shadow-inner"
+                        />
                     </h2>
                     <div className="flex items-center space-x-4">
                         <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>

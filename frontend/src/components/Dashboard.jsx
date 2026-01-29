@@ -4,7 +4,7 @@ import Button from "./Button";
 import ResultCard from "./ResultCard";
 import { analyzeLake } from "../services/api";
 import { generateReport } from "../utils/generateReport";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
 
 // Icons
 const UploadIcon = (props) => (
@@ -67,7 +67,8 @@ export default function Dashboard() {
         if (!result) return;
         setDownloading(true);
         try {
-            await generateReport(result);
+            const projectTitle = localStorage.getItem("neer_project_name") || "Lake Kolavai (Default)";
+            await generateReport(result, projectTitle);
         } catch (err) {
             console.error(err);
             setError("Failed to generate report.");
@@ -162,7 +163,7 @@ export default function Dashboard() {
 
                         {/* DEM Input (Single, No Dates) */}
                         <FileManager
-                            label="DEM File (Optional)"
+                            label="DEM File (Required for Volume)"
                             accept=".tif,.tiff"
                             multiple={false}
                             showDate={false}
@@ -246,6 +247,22 @@ export default function Dashboard() {
                             </Button>
                         </div>
 
+                        {/* Composite Map (New) */}
+                        {Array.isArray(result) && result.length > 0 && result[0].composite_map && (
+                            <div className="glass-panel p-6 rounded-lg mb-6 border border-slate-700">
+                                <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">
+                                    Multi-Temporal Composite Map
+                                </h4>
+                                <div className="flex justify-center bg-slate-900/50 p-4 rounded-lg">
+                                    <img
+                                        src={`http://localhost:8000/outputs/${result[0].composite_map}`}
+                                        alt="Composite Map"
+                                        className="max-h-[500px] object-contain rounded hover:scale-[1.02] transition-transform duration-300"
+                                    />
+                                </div>
+                            </div>
+                        )}
+
                         {/* Trend Chart */}
                         {Array.isArray(result) && result.length > 0 && (
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -261,9 +278,22 @@ export default function Dashboard() {
                                                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                                                 <XAxis dataKey="date" stroke="#64748b" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} dy={10} />
                                                 <YAxis stroke="#06b6d4" tick={{ fill: '#06b6d4', fontSize: 10 }} tickLine={false} axisLine={false} label={{ value: 'Ha', angle: -90, position: 'insideLeft', fill: '#06b6d4', fontSize: 10 }} />
-                                                <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#06b6d4', borderRadius: '4px' }} itemStyle={{ color: '#fff' }} />
+                                                <Tooltip
+                                                    contentStyle={{ backgroundColor: '#0f172a', borderColor: '#06b6d4', borderRadius: '4px' }}
+                                                    itemStyle={{ color: '#fff' }}
+                                                    cursor={{ stroke: '#06b6d4', strokeWidth: 1 }}
+                                                />
                                                 <Legend />
-                                                <Line type="monotone" dataKey="area_ha" stroke="#06b6d4" name="Area (Ha)" strokeWidth={3} dot={{ r: 4, fill: '#06b6d4' }} activeDot={{ r: 6 }} />
+                                                <Line
+                                                    type="monotone"
+                                                    dataKey="area_ha"
+                                                    stroke="#06b6d4"
+                                                    name="Area (Ha)"
+                                                    strokeWidth={3}
+                                                    dot={{ r: 5, fill: '#06b6d4', stroke: '#fff', strokeWidth: 2 }}
+                                                    activeDot={{ r: 8 }}
+                                                    isAnimationActive={false}
+                                                />
                                             </LineChart>
                                         </ResponsiveContainer>
                                     </div>
@@ -280,10 +310,45 @@ export default function Dashboard() {
                                             <LineChart data={result} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
                                                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                                                 <XAxis dataKey="date" stroke="#64748b" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} dy={10} />
-                                                <YAxis stroke="#10b981" tick={{ fill: '#10b981', fontSize: 10 }} tickLine={false} axisLine={false} label={{ value: 'TMC', angle: -90, position: 'insideLeft', fill: '#10b981', fontSize: 10 }} />
-                                                <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#10b981', borderRadius: '4px' }} itemStyle={{ color: '#fff' }} />
+                                                <YAxis
+                                                    type="number"
+                                                    stroke="#10b981"
+                                                    tick={{ fill: '#10b981', fontSize: 10 }}
+                                                    tickLine={false}
+                                                    axisLine={false}
+                                                    label={{ value: 'TMC', angle: -90, position: 'insideLeft', fill: '#10b981', fontSize: 10 }}
+                                                    domain={['auto', 'auto']}
+                                                    tickFormatter={(val) => parseFloat(val).toFixed(2)}
+                                                />
+                                                <Tooltip
+                                                    contentStyle={{ backgroundColor: '#0f172a', borderColor: '#10b981', borderRadius: '4px' }}
+                                                    itemStyle={{ color: '#fff' }}
+                                                    cursor={{ stroke: '#10b981', strokeWidth: 1 }}
+                                                />
                                                 <Legend />
-                                                <Line type="monotone" dataKey="volume_tmc" stroke="#10b981" name="Volume (TMC)" strokeWidth={3} dot={{ r: 4, fill: '#10b981' }} activeDot={{ r: 6 }} />
+                                                <Line
+                                                    type="monotone"
+                                                    dataKey="volume_tmc"
+                                                    stroke="#10b981"
+                                                    name="Volume (TMC)"
+                                                    strokeWidth={3}
+                                                    dot={{ r: 5, fill: '#10b981', stroke: '#fff', strokeWidth: 2 }}
+                                                    activeDot={{ r: 8 }}
+                                                    isAnimationActive={false}
+                                                />
+                                                {result[0].base_level && (
+                                                    <ReferenceLine
+                                                        y={result[0].volume_at_level_tmc}
+                                                        label={{
+                                                            value: `Capacity @ ${result[0].base_level}m`,
+                                                            fill: '#64748b',
+                                                            fontSize: 10,
+                                                            position: 'insideTopRight'
+                                                        }}
+                                                        stroke="#64748b"
+                                                        strokeDasharray="3 3"
+                                                    />
+                                                )}
                                             </LineChart>
                                         </ResponsiveContainer>
                                     </div>
@@ -309,8 +374,8 @@ export default function Dashboard() {
 
                                         {/* User Request: Show ONLY Base Level Volume if provided */}
                                         <ResultCard
-                                            title={res.base_level ? `Volume @ ${res.base_level}m` : "Volume"}
-                                            value={res.base_level ? res.volume_at_level_tmc : res.volume_tmc}
+                                            title="Volume"
+                                            value={res.volume_tmc}
                                             unit="TMC"
                                             icon={VolumeIcon}
                                             color="emerald"
@@ -321,6 +386,20 @@ export default function Dashboard() {
                                                 <span className="text-[10px] text-slate-500 font-mono">
                                                     Detected Level: {res.water_level}m
                                                 </span>
+                                            </div>
+                                        )}
+
+                                        {res.comparison_map && (
+                                            <div className="mt-4 border border-slate-800 rounded overflow-hidden">
+                                                <div className="bg-slate-800 px-2 py-1 text-[10px] text-slate-400 font-bold uppercase tracking-wider flex justify-between">
+                                                    <span>Boundary Comparison</span>
+                                                    <span className="text-red-400">Ref (Red)</span>
+                                                </div>
+                                                <img
+                                                    src={`http://localhost:8000/outputs/${res.comparison_map}`}
+                                                    alt="Comparison Map"
+                                                    className="w-full h-32 object-cover opacity-90 hover:opacity-100 transition-opacity"
+                                                />
                                             </div>
                                         )}
                                     </div>
