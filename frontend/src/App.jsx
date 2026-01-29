@@ -193,6 +193,26 @@ function App() {
                   />
                 </div>
 
+                {/* Elevation Stats */}
+                {(result.min_elevation > 0 || result.max_elevation > 0) && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <ResultCard
+                      title="Min Elevation"
+                      value={result.min_elevation}
+                      unit="m"
+                      icon={AreaIcon}
+                      color="blue"
+                    />
+                    <ResultCard
+                      title="Max Elevation"
+                      value={result.max_elevation}
+                      unit="m"
+                      icon={AreaIcon}
+                      color="blue"
+                    />
+                  </div>
+                )}
+
                 <div className="p-4 rounded-xl bg-slate-800/50 border border-slate-700/50 text-sm text-slate-400">
                   <p className="flex items-center">
                     <svg className="w-4 h-4 mr-2 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">

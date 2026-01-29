@@ -1,6 +1,8 @@
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.features import shapes
+from rasterio.mask import mask
+from rasterio.io import MemoryFile
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -60,6 +62,107 @@ def reproject_to_utm(src):
         )
 
     return data, profile
+
+
+def calculate_lake_volume(dem_path, polygon_path):
+    # -----------------------------
+    # 1. Load polygon
+    # -----------------------------
+    gdf = gpd.read_file(polygon_path)
+
+    if gdf.crs is None:
+        raise ValueError("Polygon has no CRS")
+
+    # Reproject polygon to UTM if needed
+    if not gdf.crs.is_projected:
+        gdf = gdf.to_crs(epsg=32644)
+
+    # -----------------------------
+    # 2. Load DEM
+    # -----------------------------
+    with rasterio.open(dem_path) as src:
+        src_array = src.read(1)
+        src_transform = src.transform
+        src_crs = src.crs
+        src_meta = src.meta.copy()
+
+    # Reproject DEM to match polygon CRS
+    dst_crs = gdf.crs
+
+    transform, width, height = calculate_default_transform(
+        src_crs, dst_crs, src.width, src.height, *src.bounds
+    )
+
+    with MemoryFile() as memfile:
+        meta = src_meta.copy()
+        meta.update({
+            "crs": dst_crs,
+            "transform": transform,
+            "width": width,
+            "height": height,
+            "nodata": -32767
+        })
+
+        with memfile.open(**meta) as dst:
+            reproject(
+                source=src_array,
+                destination=rasterio.band(dst, 1),
+                src_transform=src_transform,
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=dst_crs,
+                resampling=Resampling.bilinear
+            )
+
+            # -----------------------------
+            # 3. Clip DEM to polygon
+            # -----------------------------
+            geoms = [geom for geom in gdf.geometry]
+            try:
+                clipped_img, clipped_transform = mask(dst, geoms, crop=True)
+                dem_clipped = clipped_img[0]
+            except ValueError:
+                 print("⚠️ Polygon does not overlap with DEM")
+                 return {"min_elevation": 0, "max_elevation": 0, "max_volume_m3": 0}
+
+    # -----------------------------
+    # 4. Zonal stats
+    # -----------------------------
+    valid = dem_clipped != -32767
+    vals = dem_clipped[valid]
+    
+    if vals.size == 0:
+        return {"min_elevation": 0, "max_elevation": 0, "max_volume_m3": 0}
+
+    min_elev = float(vals.min())
+    max_elev = float(vals.max())
+
+    # -----------------------------
+    # 5. Volume curve
+    # -----------------------------
+    step = 0.1
+    levels = np.arange(min_elev, max_elev + step, step)
+
+    pixel_area = abs(clipped_transform[0] * clipped_transform[4])
+
+    records = []
+    for level in levels:
+        depth = level - dem_clipped
+        mask_arr = (dem_clipped != -32767) & (dem_clipped < level)
+
+        volume_m3 = np.sum(depth[mask_arr]) * pixel_area if np.any(mask_arr) else 0
+        records.append([level, volume_m3])
+
+    df = pd.DataFrame(records, columns=["water_level", "volume_m3"])
+
+    # Example: return final max volume
+    final_volume = float(df["volume_m3"].max())
+
+    return {
+        "min_elevation": min_elev,
+        "max_elevation": max_elev,
+        "max_volume_m3": final_volume
+    }
 
 
 # -----------------------
@@ -128,7 +231,7 @@ def process_water_from_image(image_path, lake_id, date_str, output_dir):
 
         if not geoms:
             print("⚠ No water detected")
-            return 0.0
+            return {"area_ha": 0.0, "polygon_path": None}
 
         gdf = gpd.GeoDataFrame.from_features(geoms, crs=profile["crs"])
 
@@ -154,7 +257,51 @@ def process_water_from_image(image_path, lake_id, date_str, output_dir):
         df.to_csv(csv_path, index=False)
 
         print(f"\n✅ Done → Area = {total_area:.2f} ha")
-        return total_area
+        return {
+            "area_ha": total_area, 
+            "polygon_path": poly_path
+        }
+
+
+def analyze_lake(sat_path, dem_path, lake_id, date_str, output_dir):
+    # 1. Run water detection
+    result = process_water_from_image(
+        image_path=sat_path,
+        lake_id=lake_id,
+        date_str=date_str,
+        output_dir=output_dir
+    )
+    
+    area_ha = result["area_ha"]
+    polygon_path = result["polygon_path"]
+    
+    volume_data = {
+        "min_elevation": 0,
+        "max_elevation": 0,
+        "max_volume_m3": 0
+    }
+
+    # 2. Run volume if DEM is provided and we have a water polygon
+    if dem_path and polygon_path:
+        print(f"[DEBUG] Calculating volume using DEM: {dem_path}")
+        try:
+            volume_data = calculate_lake_volume(dem_path, polygon_path)
+            print("[DEBUG] Volume calculation successful")
+        except Exception as e:
+            print(f"[ERROR] Volume calculation failed: {e}")
+
+    volume_m3 = volume_data["max_volume_m3"]
+    # TMC = Thousand Million Cubic feet. 1 TMC = 28,316,846.592 m3
+    volume_tmc = volume_m3 / 28316846.592
+
+    return {
+        "area_ha": round(area_ha, 2),
+        "volume_m3": round(volume_m3, 2),
+        "volume_tmc": round(volume_tmc, 4),
+        "min_elevation": round(volume_data["min_elevation"], 2),
+        "max_elevation": round(volume_data["max_elevation"], 2),
+        "message": "Analysis successful"
+    }
 
 
 

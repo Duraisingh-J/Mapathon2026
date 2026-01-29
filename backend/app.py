@@ -4,7 +4,7 @@ import uuid
 from datetime import date
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from .pipeline import process_water_from_image
+from . import pipeline
 
 app = FastAPI()
 
@@ -55,22 +55,21 @@ async def analyze(satellite: UploadFile = File(...), dem: UploadFile = File(None
         print(f"DEM saved to {dem_path}")
 
     try:
-        print(f"[DEBUG] Calling pipeline with sat={sat_path}, id={run_id}")
-        # Call Pipeline
-        area_ha = process_water_from_image(
-            image_path=sat_path, 
-            lake_id=run_id, 
-            date_str=today_str, 
+        print(f"[DEBUG] Calling pipeline with sat={sat_path}, dem={dem_path if dem else 'None'}, id={run_id}")
+        
+        # Call Analysis Orchestrator
+        dem_abs_path = dem_path if dem else None
+        
+        result = pipeline.analyze_lake(
+            sat_path=sat_path,
+            dem_path=dem_abs_path,
+            lake_id=run_id,
+            date_str=today_str,
             output_dir=OUTPUT_DIR
         )
-        print(f"[DEBUG] Pipeline returned area: {area_ha}")
         
-        return {
-            "area_ha": round(area_ha, 2),
-            "volume_m3": 0,    # Placeholder until volume logic is added
-            "volume_tmc": 0,   # Placeholder until volume logic is added
-            "message": "Analysis successful"
-        }
+        print(f"[DEBUG] Pipeline returned: {result}")
+        return result
     except Exception as e:
         print(f"Pipeline Error: {e}")
         return {"error": str(e)}
