@@ -1,21 +1,24 @@
-export default function ResultCard({ title, value, unit, icon: Icon, color = "blue" }) {
-    const colorStyles = {
-        blue: "from-blue-500/10 to-blue-500/5 text-blue-400 border-blue-500/20",
-        cyan: "from-cyan-500/10 to-cyan-500/5 text-cyan-400 border-cyan-500/20",
-        emerald: "from-emerald-500/10 to-emerald-500/5 text-emerald-400 border-emerald-500/20",
-    }
+export default function ResultCard({ title, value, unit, icon: Icon, color = "cyan" }) {
+    const colorClasses = {
+        cyan: "from-cyan-500 to-blue-500 text-cyan-400",
+        blue: "from-blue-500 to-indigo-500 text-blue-400",
+        emerald: "from-emerald-500 to-teal-500 text-emerald-400",
+    };
+
+    const gradient = colorClasses[color] || colorClasses.cyan;
 
     return (
-        <div className={`relative overflow-hidden rounded-2xl border p-6 bg-gradient-to-br ${colorStyles[color]} backdrop-blur-sm`}>
-            <div className="relative z-10 flex items-start justify-between">
+        <div className="bg-slate-800 rounded px-4 py-4 border-l-2 border-slate-700 hover:border-l-cyan-500 transition-colors group">
+            <div className="flex items-center justify-between">
                 <div>
-                    <p className="text-sm font-medium text-slate-400 mb-1">{title}</p>
-                    <h3 className="text-2xl font-bold text-white tracking-tight">
-                        {value} <span className="text-sm font-normal text-slate-500 ml-1">{unit}</span>
-                    </h3>
+                    <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold mb-1">{title}</p>
+                    <div className="flex items-baseline space-x-2">
+                        <span className="text-2xl font-bold text-white font-mono">{value}</span>
+                        <span className="text-xs text-slate-500">{unit}</span>
+                    </div>
                 </div>
-                <div className={`p-3 rounded-xl bg-slate-900/40 border border-${color}-500/20`}>
-                    {Icon && <Icon className="w-6 h-6" />}
+                <div className={`p-2 rounded bg-slate-900/50 text-${color}-500 opacity-75 group-hover:opacity-100 group-hover:text-${color}-400 transition-all`}>
+                    <Icon className="w-5 h-5" />
                 </div>
             </div>
         </div>

@@ -9,3 +9,5 @@ fastapi
 uvicorn
 scikit-image
 python-multipart
+s2cloudless
+scikit-learn

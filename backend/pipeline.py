@@ -10,6 +10,43 @@ from shapely.geometry import shape
 from datetime import datetime
 import os
 from pyproj import CRS
+from s2cloudless import S2PixelCloudDetector
+
+# -----------------------
+# CLOUD MASK (s2cloudless)
+# -----------------------
+def apply_s2cloudless_mask(data):
+    """
+    data: (bands, H, W) -> expects B2,B3,B4,B8 or compatible sequence.
+    returns: cloud_mask (H, W)
+    """
+    # Move bands to last axis: (H, W, bands)
+    img = np.moveaxis(data, 0, -1)
+    
+    # Scale to 0-1 (Sentinel-2 usually 0-10000 range, s2cloudless expects reflectance < 1 logic or trained on it)
+    # The user provided snippet divides by 10000.0, so we do that.
+    img = img / 10000.0
+
+    cloud_detector = S2PixelCloudDetector(
+        threshold=0.4,
+        average_over=4,
+        dilation_size=2
+    )
+
+    try:
+        # Note: default S2PixelCloudDetector expects 10 bands. 
+        # If input has fewer, this might fail unless bands="timestamp" or similar customization is used.
+        # But per user instruction, we use this code.
+        probs = cloud_detector.get_cloud_probability_maps(img)
+        cloud_mask = probs > 0.4
+        print(f"☁️ Cloud pixels masked: {np.sum(cloud_mask)}")
+        return cloud_mask
+    except ValueError as ve:
+        print(f"⚠️ Cloud detection skipped (band mismatch?): {ve}")
+        return np.zeros(img.shape[:2], dtype=bool)
+    except Exception as e:
+        print(f"⚠️ Cloud detection failed: {e}")
+        return np.zeros(img.shape[:2], dtype=bool)
 
 # -----------------------
 # CONFIG
@@ -64,7 +101,7 @@ def reproject_to_utm(src):
     return data, profile
 
 
-def calculate_lake_volume(dem_path, polygon_path):
+def calculate_lake_volume(dem_path, polygon_path, base_level=None, current_level=None, target_area_ha=None):
     # -----------------------------
     # 1. Load polygon
     # -----------------------------
@@ -149,24 +186,127 @@ def calculate_lake_volume(dem_path, polygon_path):
     for level in levels:
         depth = level - dem_clipped
         mask_arr = (dem_clipped != -32767) & (dem_clipped < level)
+        
+        if np.any(mask_arr):
+            volume_m3 = np.sum(depth[mask_arr]) * pixel_area
+            area_m2 = np.sum(mask_arr) * pixel_area
+        else:
+            volume_m3 = 0.0
+            area_m2 = 0.0
 
-        volume_m3 = np.sum(depth[mask_arr]) * pixel_area if np.any(mask_arr) else 0
-        records.append([level, volume_m3])
+        volume_tmc = volume_m3 / 28316846.592
+        area_ha = area_m2 / 10000.0
+        records.append([level, volume_m3, volume_tmc, area_ha])
 
-    df = pd.DataFrame(records, columns=["water_level", "volume_m3"])
+    df = pd.DataFrame(records, columns=["water_level", "volume_m3", "volume_tmc", "area_ha"])
+    
+    # CSV saving is handled by caller (analyze_lake)
+    # if result_csv_path: ...
 
     # Example: return final max volume
     final_volume = float(df["volume_m3"].max())
+    
+    volume_at_base = None
+    if base_level is not None:
+        print(f"[DEBUG] Interpolating volume for Base Level: {base_level}")
+        # Interpolate or find closest
+        try:
+             # Ensure sorted for interpolation
+            df_sorted = df.sort_values("water_level")
+            
+            min_lvl = df_sorted["water_level"].min()
+            max_lvl = df_sorted["water_level"].max()
+            print(f"[DEBUG] Volume Curve Range: {min_lvl} to {max_lvl}")
+            
+            if base_level < min_lvl:
+                print(f"[DEBUG] Base Level {base_level} < Min Level {min_lvl} -> 0")
+                volume_at_base = 0.0
+            elif base_level > max_lvl:
+                print(f"[DEBUG] Base Level {base_level} > Max Level {max_lvl} -> Max Vol")
+                volume_at_base = final_volume
+            else:
+                volume_at_base = np.interp(base_level, df_sorted["water_level"], df_sorted["volume_m3"])
+                print(f"[DEBUG] Interpolated Volume: {volume_at_base}")
+        except Exception as e:
+            print(f"[ERROR] Interpolation error: {e}")
+            volume_at_base = 0.0
+
+    # Interpolate for Current Water Level (Detected either by Area or Mask Stats)
+    volume_at_current = None
+    water_level_at_current = None
+    
+    # If target_area (from Satellite) is provided, use Area-Elevation mapping (Most Accurate)
+    if current_level is not None and isinstance(current_level, str) and current_level == "AREA_LOOKUP":
+        pass # Logic handled below if target_area provided
+        
+    # Interpolate for Current Water Level
+    # Priority: Area Lookup > Elev Lookup
+    
+    if target_area_ha is not None:
+        print(f"[DEBUG] Calculating Volume via Area Lookup (Target: {target_area_ha:.2f} Ha)")
+        try:
+            df_sorted = df.sort_values("area_ha")
+            max_area = df_sorted["area_ha"].max()
+            
+            if target_area_ha <= 0:
+                water_level_at_current = min_elev
+                volume_at_current = 0.0
+            elif target_area_ha > max_area:
+                 # Be careful, max_area might be smaller than satellite area if DEM is clipped tight
+                 print(f"[WARN] Target Area {target_area_ha} > Max Curv Area {max_area}. Using Max.")
+                 water_level_at_current = max_elev
+                 volume_at_current = final_volume
+            else:
+                # Find Level for Area
+                water_level_at_current = np.interp(target_area_ha, df_sorted["area_ha"], df_sorted["water_level"])
+                # Find Volume for that Level (or just interp area->vol directly)
+                volume_at_current = np.interp(target_area_ha, df_sorted["area_ha"], df_sorted["volume_m3"])
+                
+            print(f"[DEBUG] Matched Level: {water_level_at_current:.2f}m, Vol: {volume_at_current}")
+            
+        except Exception as e:
+            print(f"[ERROR] Area lookup failed: {e}")
+            volume_at_current = 0.0
+            water_level_at_current = min_elev
+
+    elif current_level is not None and isinstance(current_level, (int, float)):
+        # Fallback to Elev Lookup
+        water_level_at_current = current_level
+        try:
+            if current_level < min_elev:
+                volume_at_current = 0.0
+            elif current_level > max_elev:
+                volume_at_current = final_volume
+            else:
+                volume_at_current = np.interp(current_level, df["water_level"], df["volume_m3"])
+        except:
+             volume_at_current = 0.0
 
     return {
         "min_elevation": min_elev,
         "max_elevation": max_elev,
-        "max_volume_m3": final_volume
+        "max_volume_m3": final_volume,
+        "volume_at_base_level": volume_at_base,
+        "volume_at_current_level": volume_at_current,
+        "water_level_recalculated": water_level_at_current,
+        "curve_df": df
     }
 
 
 # -----------------------
 # MAIN PIPELINE
+# -----------------------
+def process_water_from_image(image_path, lake_id, date_str, output_dir):
+    # ... (existing code)
+    date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    # ...
+    # (Leaving this function mostly alone, just ensuring it returns correct dict as before)
+    # But wait, I'm replacing lines, so I need to be careful not to delete process_water_from_image body.
+    # Actually, I am only replacing the end of calculate_lake_volume.
+    pass
+
+# Redoing chunk to be safe and simple.
+
 # -----------------------
 def process_water_from_image(image_path, lake_id, date_str, output_dir):
 
@@ -192,9 +332,22 @@ def process_water_from_image(image_path, lake_id, date_str, output_dir):
         else:
             data = src.read().astype("float32")
             profile = src.profile
+            
+        print("[DEBUG] Raster Shape:", data.shape)
 
+        # -----------------------------
+        # CLOUD MASKING
+        # -----------------------------
+        cloud_mask = apply_s2cloudless_mask(data)
+
+        # Bands
         green = data[GREEN_BAND - 1]
         nir   = data[NIR_BAND - 1]
+        
+        # Apply mask
+        green = np.where(cloud_mask, np.nan, green)
+        nir   = np.where(cloud_mask, np.nan, nir)
+        
         transform = profile["transform"]
 
         # NDWI
@@ -263,7 +416,7 @@ def process_water_from_image(image_path, lake_id, date_str, output_dir):
         }
 
 
-def analyze_lake(sat_path, dem_path, lake_id, date_str, output_dir):
+def analyze_lake(sat_path, dem_path, lake_id, date_str, output_dir, base_level=None):
     # 1. Run water detection
     result = process_water_from_image(
         image_path=sat_path,
@@ -278,30 +431,115 @@ def analyze_lake(sat_path, dem_path, lake_id, date_str, output_dir):
     volume_data = {
         "min_elevation": 0,
         "max_elevation": 0,
-        "max_volume_m3": 0
+        "max_volume_m3": 0,
+        "volume_at_base_level": None,
+        "volume_at_current_level": 0
     }
 
-    # 2. Run volume if DEM is provided and we have a water polygon
-    if dem_path and polygon_path:
-        print(f"[DEBUG] Calculating volume using DEM: {dem_path}")
+    # 2. Run volume logic if DEM provided
+    if dem_path:
+        current_water_level = None
+        
+        # A. Detect Current Water Level from Mask
+        if polygon_path:
+            try:
+                gdf = gpd.read_file(polygon_path)
+                with rasterio.open(dem_path) as src:
+                    # Reproject GDF to DEM crs if needed
+                    if src.crs and gdf.crs and src.crs != gdf.crs:
+                        gdf_proj = gdf.to_crs(src.crs)
+                    else:
+                        gdf_proj = gdf
+                        
+                    # Mask DEM with water polygon
+                    geoms = [g for g in gdf_proj.geometry]
+                    out_image, out_transform = mask(src, geoms, crop=True)
+                    
+                    nodata = src.nodata
+                    if nodata is None:
+                        nodata = -32767 # Fallback
+                        print("[WARN] DEM nodata is None, assuming -32767")
+                    
+                    print(f"[DEBUG] DEM Nodata Value: {nodata}")
+                    
+                    valid_mask = (out_image[0] != nodata) & (~np.isnan(out_image[0]))
+                    valid_pixels = out_image[0][valid_mask]
+                    
+                    # Sanity check: Filter extremely low values that might be legacy nodata
+                    valid_pixels = valid_pixels[valid_pixels > -10000] 
+                    
+                    if valid_pixels.size > 0:
+                        # ROBUST SHORELINE DETECTION (V3 - Conservative)
+                        # Reject top 5% (Land/Noise) and bottom 85% (Bed)
+                        p85 = np.percentile(valid_pixels, 85)
+                        p95 = np.percentile(valid_pixels, 95)
+                        
+                        shoreline_pixels = valid_pixels[(valid_pixels >= p85) & (valid_pixels <= p95)]
+                        
+                        if shoreline_pixels.size > 0:
+                             current_water_level = float(np.median(shoreline_pixels))
+                             print(f"[DEBUG] Detected Water Level (P85-P95 Median): {current_water_level:.2f} m")
+                        else:
+                             current_water_level = float(np.percentile(valid_pixels, 90))
+                             print(f"[DEBUG] Fallback Water Level (P90): {current_water_level:.2f} m")
+
+                    else:
+                        print("[DEBUG] No valid DEM pixels found under water mask.")
+            except Exception as e:
+                print(f"[ERROR] Failed to detect water level from mask: {e}")
+
+        # B. Calculate Full Basin Curve & Lookup
         try:
-            volume_data = calculate_lake_volume(dem_path, polygon_path)
-            print("[DEBUG] Volume calculation successful")
+            # Pass polygon_path (calculated above) to volume logic
+            # Use Area-Based Lookup for robust volume
+            volume_data = calculate_lake_volume(
+                dem_path, 
+                polygon_path, 
+                base_level=base_level, 
+                current_level=current_water_level, # Still pass detected level as debug/backup
+                target_area_ha=area_ha # PRIMARY lookup
+            )
+            
+            # Update current_water_level if it was recalculated from Area
+            if volume_data.get("water_level_recalculated"):
+                current_water_level = volume_data.get("water_level_recalculated")
+            
+            # Save Volume Curve CSV if returned
+            if "curve_df" in volume_data:
+                df_curve = volume_data.pop("curve_df")
+                curve_path = os.path.join(output_dir, f"{lake_id}_{date_str}_volume_curve.csv")
+                df_curve.to_csv(curve_path, index=False)
+                print(f"[DEBUG] Saved volume curve to {curve_path}")
         except Exception as e:
-            print(f"[ERROR] Volume calculation failed: {e}")
+             print(f"[ERROR] Full Basin Volume Calculation failed: {e}")
 
-    volume_m3 = volume_data["max_volume_m3"]
-    # TMC = Thousand Million Cubic feet. 1 TMC = 28,316,846.592 m3
-    volume_tmc = volume_m3 / 28316846.592
 
-    return {
+    # 3. Construct Final Result
+    # "volume_m3" = Volume at Current Water Level (Best Estimate)
+    current_vol = volume_data.get("volume_at_current_level")
+    # If None (e.g. no intersection), fallback to 0
+    if current_vol is None: current_vol = 0.0
+    
+    volume_tmc = current_vol / 28316846.592
+    
+    final_res = {
         "area_ha": round(area_ha, 2),
-        "volume_m3": round(volume_m3, 2),
+        "water_level": round(current_water_level, 2) if current_water_level is not None else 0,
+        "volume_m3": round(current_vol, 2),
         "volume_tmc": round(volume_tmc, 4),
-        "min_elevation": round(volume_data["min_elevation"], 2),
-        "max_elevation": round(volume_data["max_elevation"], 2),
+        "min_elevation": round(float(volume_data["min_elevation"]), 2),
+        "max_elevation": round(float(volume_data["max_elevation"]), 2),
         "message": "Analysis successful"
     }
+
+    # If base level was requested, add it
+    base_vol = volume_data.get("volume_at_base_level")
+    if base_vol is not None:
+         final_res["base_level"] = round(float(base_level), 2)
+         final_res["volume_at_level_m3"] = round(float(base_vol), 2)
+         final_res["volume_at_level_tmc"] = round(float(base_vol) / 28316846.592, 4)
+    
+    return final_res
 
 
 

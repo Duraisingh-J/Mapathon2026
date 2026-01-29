@@ -29,47 +29,88 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+from fastapi import FastAPI, UploadFile, File, Form
+
+# ... (imports)
+
+from typing import List
+
 @app.post("/analyze")
-async def analyze(satellite: UploadFile = File(...), dem: UploadFile = File(None)):
+async def analyze(
+    satellite: List[UploadFile] = File(...), 
+    dem: UploadFile = File(None),
+    base_level: float = Form(None),
+    dates: str = Form(None)
+):
     # Generate unique run ID
     run_id = str(uuid.uuid4())[:8]
-    today_str = str(date.today())
     
-    # Save Uploaded File
-    sat_ext = os.path.splitext(satellite.filename)[1]
-    sat_filename = f"{run_id}_sat{sat_ext}"
-    sat_path = os.path.join(UPLOAD_DIR, sat_filename)
+    # Parse dates if provided
+    date_list = []
+    if dates:
+        # Expect comma or newline separated dates
+        date_list = [d.strip() for d in dates.replace("\n", ",").split(",") if d.strip()]
     
-    with open(sat_path, "wb") as f:
-        shutil.copyfileobj(satellite.file, f)
-        
-    print(f"[DEBUG] Satellite file saved to {sat_path}")
-
-    # Save DEM if provided (optional)
+    # Save DEM if provided (optional) - ONE DEM for ALL images
+    dem_abs_path = None
     if dem:
         dem_ext = os.path.splitext(dem.filename)[1]
         dem_filename = f"{run_id}_dem{dem_ext}"
         dem_path = os.path.join(UPLOAD_DIR, dem_filename)
         with open(dem_path, "wb") as f:
             shutil.copyfileobj(dem.file, f)
-        print(f"DEM saved to {dem_path}")
+        dem_abs_path = dem_path
+        print(f"[DEBUG] DEM saved to {dem_path}")
 
-    try:
-        print(f"[DEBUG] Calling pipeline with sat={sat_path}, dem={dem_path if dem else 'None'}, id={run_id}")
+    results = []
+
+    for idx, sat_file in enumerate(satellite):
+        # Determine date for this image
+        if idx < len(date_list):
+            current_date_str = date_list[idx]
+        else:
+            # Fallback: Use today's date
+            # If multiple images have same date, pipeline might overwrite specific day files, 
+            # but usually fine for unique run_ids or different output filenames.
+            # To be safe, we might want to append index or something if needed, 
+            # but pipeline uses lake_id (run_id) + date. 
+            # Let's simple use today
+            current_date_str = str(date.today())
+
+        # Save Uploaded File
+        sat_ext = os.path.splitext(sat_file.filename)[1]
+        # Unique filename per image
+        sat_filename = f"{run_id}_sat_{idx}{sat_ext}"
+        sat_path = os.path.join(UPLOAD_DIR, sat_filename)
         
-        # Call Analysis Orchestrator
-        dem_abs_path = dem_path if dem else None
-        
-        result = pipeline.analyze_lake(
-            sat_path=sat_path,
-            dem_path=dem_abs_path,
-            lake_id=run_id,
-            date_str=today_str,
-            output_dir=OUTPUT_DIR
-        )
-        
-        print(f"[DEBUG] Pipeline returned: {result}")
-        return result
-    except Exception as e:
-        print(f"Pipeline Error: {e}")
-        return {"error": str(e)}
+        with open(sat_path, "wb") as f:
+            shutil.copyfileobj(sat_file.file, f)
+            
+        print(f"[DEBUG] Processing Image {idx+1}/{len(satellite)}: {sat_filename} for date {current_date_str}")
+
+        try:
+            # Call Analysis Orchestrator
+            # Call Analysis Orchestrator
+            result = pipeline.analyze_lake(
+                sat_path=sat_path,
+                dem_path=dem_abs_path,
+                lake_id=f"{run_id}_{idx}", # Unique ID per image to prevent overwrite
+                date_str=current_date_str,
+                output_dir=OUTPUT_DIR,
+                base_level=base_level
+            )
+            
+            # Add date to result for frontend display
+            result["date"] = current_date_str
+            results.append(result)
+            
+        except Exception as e:
+            print(f"[ERROR] Processing {sat_filename} failed: {e}")
+            results.append({
+                "error": str(e), 
+                "filename": sat_filename,
+                "date": current_date_str
+            })
+
+    print(f"[DEBUG] All processing done. Returning {len(results)} results.")
+    return results

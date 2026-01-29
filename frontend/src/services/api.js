@@ -1,8 +1,26 @@
-export const analyzeLake = async (satelliteFile, demFile) => {
+export const analyzeLake = async (satelliteFiles, demFile, baseLevel, dates) => {
     const form = new FormData();
-    form.append("satellite", satelliteFile);
+
+    // Check if satelliteFiles is an array or FileList, loop and append
+    if (satelliteFiles) {
+        if (satelliteFiles.length && typeof satelliteFiles[Symbol.iterator] === 'function') {
+            for (let i = 0; i < satelliteFiles.length; i++) {
+                form.append("satellite", satelliteFiles[i]);
+            }
+        } else {
+            // Single file fallback
+            form.append("satellite", satelliteFiles);
+        }
+    }
+
     if (demFile) {
         form.append("dem", demFile);
+    }
+    if (baseLevel) {
+        form.append("base_level", baseLevel);
+    }
+    if (dates) {
+        form.append("dates", dates);
     }
 
     const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
@@ -23,7 +41,7 @@ export const analyzeLake = async (satelliteFile, demFile) => {
 
         const data = await res.json();
         console.log("[DEBUG] Response data:", data);
-        return data;
+        return data; // This will now be an array
     } catch (error) {
         console.error("Analysis failed:", error);
         throw error;
