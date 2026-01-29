@@ -8,4 +8,9 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  base: "/Mapathon2026/",
+  build: {
+    outDir: "../docs",
+    emptyOutDir: true,
+  }
 })
