@@ -5,9 +5,10 @@ export const analyzeLake = async (satelliteFile, demFile) => {
         form.append("dem", demFile);
     }
 
-    console.log("[DEBUG] Sending request to backend...");
+    const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+    console.log("[DEBUG] Sending request to backend at:", API_URL);
     try {
-        const res = await fetch("http://127.0.0.1:8000/analyze", {
+        const res = await fetch(`${API_URL}/analyze`, {
             method: "POST",
             body: form,
         });
