@@ -1,5 +1,7 @@
 import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import html2canvas from "html2canvas";
+import { API_URL } from "../config";
 
 export const generateReport = async (results, projectTitle = "Lake Kolavai (Default)") => {
     const doc = new jsPDF('p', 'mm', 'a4');
@@ -200,7 +202,7 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
 
         cursorY = addSectionHeader(title, cursorY);
 
-        const imgUrl = `http://localhost:8000/outputs/${filename}`;
+        const imgUrl = `${API_URL}/outputs/${filename}`;
 
         try {
             // Load image using an Image object to get dimensions
@@ -273,7 +275,7 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
             // Image (Result Image or Verification Map)
             const imgFile = res.comparison_map || res.result_image;
             if (imgFile) {
-                const imgUrl = `http://localhost:8000/outputs/${imgFile}`;
+                const imgUrl = `${API_URL}/outputs/${imgFile}`;
                 try {
                     const img = new Image();
                     img.crossOrigin = "Anonymous";

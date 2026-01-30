@@ -40,6 +40,7 @@ const ErrorIcon = (props) => (
 );
 
 import FileManager from "./FileManager";
+import { API_URL } from "../config";
 
 // ... existing imports
 
@@ -260,7 +261,7 @@ export default function Dashboard() {
                                     </div>
                                     <div className="flex justify-center bg-white p-2 rounded">
                                         <img
-                                            src={`http://localhost:8000/outputs/${result[0].composite_map}`}
+                                            src={`${API_URL}/outputs/${result[0].composite_map}`}
                                             alt="Composite Map"
                                             className="max-h-[500px] w-auto object-contain"
                                         />
@@ -279,7 +280,7 @@ export default function Dashboard() {
                                     </div>
                                     <div className="flex justify-center bg-white p-2 rounded">
                                         <img
-                                            src={`http://localhost:8000/outputs/${result[0].volume_map_3d}`}
+                                            src={`${API_URL}/outputs/${result[0].combined_volume_map}`}
                                             alt="3D Volume Map"
                                             className="max-h-[500px] w-auto object-contain"
                                         />
@@ -291,38 +292,7 @@ export default function Dashboard() {
                 </div>
             </div>
 
-            {/* MIDDLE SECTION: MAPS (3D & COMPOSITE) */}
-            {result && result.length > 0 && (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-6">
-                    {/* 3D Volumetric Map */}
-                    {result[0].volume_map_3d && (
-                        <div className="glass-panel p-6 rounded-lg border border-slate-800">
-                            <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">
-                                3D Volumetric Analysis
-                            </h4>
-                            <img
-                                src={`http://localhost:8000/outputs/${result[0].volume_map_3d}`}
-                                alt="3D Volume Map"
-                                className="w-full h-auto rounded-lg shadow-lg border border-slate-700"
-                            />
-                        </div>
-                    )}
 
-                    {/* Multi-Temporal Composite Map */}
-                    {result[0].composite_map && (
-                        <div className="glass-panel p-6 rounded-lg border border-slate-800">
-                            <h4 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4 border-b border-slate-800 pb-2">
-                                Multi-Temporal Composite
-                            </h4>
-                            <img
-                                src={`http://localhost:8000/outputs/${result[0].composite_map}`}
-                                alt="Composite Map"
-                                className="w-full h-auto rounded-lg shadow-lg border border-slate-700"
-                            />
-                        </div>
-                    )}
-                </div>
-            )}
 
             {/* MIDDLE SECTION: GRAPHS (Full Width) */}
             {result && (
@@ -531,7 +501,7 @@ export default function Dashboard() {
                                             <span>{res.comparison_map ? "Comparison (Base vs Current)" : "Water Extraction"}</span>
                                         </div>
                                         <img
-                                            src={`http://localhost:8000/outputs/${res.comparison_map || res.result_image}`}
+                                            src={`${API_URL}/outputs/${res.comparison_map || res.result_image}`}
                                             alt="Analysis Map"
                                             className="w-full h-auto object-cover opacity-90 hover:opacity-100 transition-opacity"
                                         />

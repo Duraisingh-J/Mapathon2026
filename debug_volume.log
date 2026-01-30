@@ -906,3 +906,14 @@
 3       32.2  187.021970  0.093511
 4       32.3  280.532955  0.093511
 2026-01-30 23:17:08.505890: Interpolation: Target 486.44 -> Vol 8107976.143793969
+2026-01-30 23:37:30.005093: START Volume Calc: DEM=D:\WaterSpreadDetectionProject\waterSpreadPipeline\backend\uploads\68ae2228_dem.tif, Target=484.34
+2026-01-30 23:37:30.098772: Detected Effective Lake Floor at 33.000000000000014m (Area Jump: 0.09 -> 590.99 Ha)
+2026-01-30 23:37:30.098772: Auto-Rectifying Zero Volume: Applying Default Floor at 28.00m (5m below effective floor)
+2026-01-30 23:37:30.109003: Curve Data Head:
+   elevation   volume_m3   area_ha
+0       28.0    0.000000  0.000000
+1       32.0    0.000000  0.093511
+2       32.1   93.510985  0.093511
+3       32.2  187.021970  0.093511
+4       32.3  280.532955  0.093511
+2026-01-30 23:37:30.110537: Interpolation: Target 484.34 -> Vol 8072970.272611819

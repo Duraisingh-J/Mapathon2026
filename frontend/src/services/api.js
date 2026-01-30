@@ -1,3 +1,4 @@
+import { API_URL } from "../config";
 export const analyzeLake = async (satelliteFiles, demFile, baseLevel, dates) => {
     const form = new FormData();
 
@@ -23,7 +24,8 @@ export const analyzeLake = async (satelliteFiles, demFile, baseLevel, dates) => 
         form.append("dates", dates);
     }
 
-    const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+
+
     console.log("[DEBUG] Sending request to backend at:", API_URL);
     try {
         const res = await fetch(`${API_URL}/analyze`, {
