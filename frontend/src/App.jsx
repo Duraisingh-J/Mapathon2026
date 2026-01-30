@@ -1,7 +1,6 @@
 import { useState } from "react";
 import Layout from "./components/Layout";
 import Dashboard from "./components/Dashboard";
-import Reports from "./components/Reports";
 import Settings from "./components/Settings";
 
 function App() {
@@ -11,8 +10,6 @@ function App() {
     switch (activeTab) {
       case "dashboard":
         return <Dashboard />;
-      case "reports":
-        return <Reports />;
       case "settings":
         return <Settings />;
       default:

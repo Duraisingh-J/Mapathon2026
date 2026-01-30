@@ -6,6 +6,8 @@ import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.crs import CRS
 from rasterio.features import shapes
+from shapely.geometry import Polygon, mapping, shape
+from shapely.ops import unary_union
 from rasterio.vrt import WarpedVRT
 import geopandas as gpd
 import pandas as pd
@@ -13,6 +15,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from rasterio.plot import show
+from skimage import morphology
 
 try:
     from s2cloudless import S2PixelCloudDetector
@@ -24,7 +27,13 @@ except ImportError:
 # ======================================================
 # CONSTANTS
 # ======================================================
-NDWI_THRESHOLD = 0.0 # Adjustable
+# ======================================================
+# CONSTANTS
+# ======================================================
+# ======================================================
+# CONSTANTS
+# ======================================================
+NDWI_THRESHOLD = 0.0 # Relaxed from 0.15 to 0.05 to recover missing water
 
 
 # ======================================================
@@ -36,13 +45,41 @@ def apply_s2cloudless_mask(data):
         return np.zeros(data.shape[1:], dtype=bool)
 
     try:
-        # s2cloudless expects (H, W, Bands) and 0-1 range
-        img = np.moveaxis(data, 0, -1) / 10000.0
-        detector = S2PixelCloudDetector(threshold=0.4, average_over=4, dilation_size=2)
+        # Check data range to normalize correctly
+        # s2cloudless model expects values 0.0 - 1.0
+        max_val = np.max(data)
+        
+        if max_val > 5000:
+             scale_factor = 10000.0 # Standard Sentinel-2 L1C/L2A (12-16 bit)
+             print("[DEBUG] Data max > 5000, assuming 16-bit S2 data (scale 10000)")
+        elif max_val > 1.0:
+             scale_factor = 255.0   # Likely 8-bit export
+             print("[DEBUG] Data max <= 5000, assuming 8-bit data (scale 255)")
+        else:
+             scale_factor = 1.0     # Already normalized
+             print("[DEBUG] Data max <= 1.0, assuming normalized data (scale 1)")
+
+        # Move axis to (H, W, Bands)
+        img = np.moveaxis(data, 0, -1) / scale_factor
+        
+        # Clip to ensure valid range 0-1
+        img = np.clip(img, 0, 1)
+
+        # Stricter settings: threshold 0.2 (more sensitive), dilation 4 (removes cloud edges)
+        detector = S2PixelCloudDetector(threshold=0.2, average_over=4, dilation_size=4)
         
         # Note: If bands mismatch, this might throw, but we catch it
+        # S2Cloudless expects specific bands. If input has fewer, it might fail or give junk.
+        # It expects B01, B02, B04, B05, B08, B8A, B09, B10, B11, B12 (10 bands).
+        # If user uploads 3-band RGB or 4-band, we can't use S2PixelCloudDetector properly.
+        # It usually throws an error if band count mismatches.
+        
+        if img.shape[-1] < 10:
+             print(f"[WARN] Image has {img.shape[-1]} bands. S2Cloudless needs 10+ standard S2 bands. Skipping ML cloud mask.")
+             return np.zeros(data.shape[1:], dtype=bool)
+
         probs = detector.get_cloud_probability_maps(img)
-        mask = probs > 0.4
+        mask = probs > 0.2
         print(f"[INFO] Cloud pixels masked: {mask.sum()}")
         return mask
     except Exception as e:
@@ -90,9 +127,9 @@ def detect_band_indices(src):
     return band_map
 
 def scl_cloud_mask(scl):
-    # Classes: 3(Snow/Shadow?), 8(Cloud med), 9(Cloud high), 10(Cirrus), 11(Snow)
-    # SCL Classes: 0: No Data, 1: Saturated, 2: Dark, 3: Cloud Shadows, 4: Veg, 5: Soil, 6: Water, 7: Unclassified, 8: Cloud med, 9: Cloud high, 10: Cirrus, 11: Snow
-    cloud_classes = [3, 8, 9, 10, 11] 
+    # Classes: 1(Saturated), 3(Shadow), 7(Unclassified), 8(Cloud med), 9(Cloud high), 10(Cirrus), 11(Snow)
+    # Removing these ensures we don't accidentally classify noise as water
+    cloud_classes = [1, 3, 7, 8, 9, 10, 11] 
     return np.isin(scl, cloud_classes)
 
 def scl_water_mask(scl):
@@ -171,23 +208,25 @@ def process_water_from_image(image_path, lake_id, date_str, output_dir):
         # 1. SCL PATH (Priority)
         # ==================================================
         if bands.get("scl") is not None and bands["scl"] < data.shape[0]:
-            print(f"[INFO] SCL Band found at index {bands['scl']}. Using SCL for classification.")
+            print(f"[INFO] SCL Band found at index {bands['scl']}. Using SCL for Cloud Masking ONLY.")
             scl = data[bands["scl"]].astype(np.uint8)
+            
+            # 1. Use SCL to identify Clouds and Shadows (Strict Masking)
             cloud_mask_layer = scl_cloud_mask(scl)
             
-            # Use SCL Water class directly?
-            # Or use SCL just for cloud masking and NDWI for water?
-            # User snippet used scl_water_mask directly. Let's try that first as requested.
-            # But we might want to also calculate NDWI for visualization or refinement.
-            
-            water_mask = scl_water_mask(scl)
-            scl_found = True
-            
-            # Still calc NDWI for artifacts/debugging if useful, or to fill 'ndwi_path'
-            # We can treat SCL cloud mask as invalid for NDWI
+            # 2. Revert to Simple Water Detection (Old Code Style)
+            # Just mask out the bad pixels (clouds) and use standard NDWI threshold
             green_masked = np.where(cloud_mask_layer, np.nan, green)
             nir_masked   = np.where(cloud_mask_layer, np.nan, nir)
+            
             ndwi = (green_masked - nir_masked) / (green_masked + nir_masked + 1e-6)
+            
+            # Simple Thresholding (No SCL Water requirement)
+            # This recovers the "drastically reduced" area by being inclusive again
+            ndwi_filled = np.nan_to_num(ndwi, nan=-1.0)
+            water_mask = ndwi_filled > NDWI_THRESHOLD
+            
+            scl_found = True
             
         # ==================================================
         # 2. FALLBACK PATH (NDWI + s2cloudless)
@@ -202,6 +241,13 @@ def process_water_from_image(image_path, lake_id, date_str, output_dir):
             ndwi = (green_masked - nir_masked) / (green_masked + nir_masked + 1e-6)
             water_mask = ndwi >= NDWI_THRESHOLD
 
+            # Clean noise (Aggressive)
+            kernel = morphology.square(3) 
+            water_mask = morphology.opening(water_mask, kernel)
+            water_mask = morphology.remove_small_objects(water_mask.astype(bool), min_size=64).astype(np.uint8)
+            
+            water_mask = (water_mask > 0)
+            
         # Save NDWI (Optional, but good for reference)
         # If we used SCL, ndwi variable is still calculated above for consistency or strictly for export
         ndwi_path = os.path.join(ndwi_dir, f"{lake_id}_{date_str}_ndwi.tif")
@@ -215,48 +261,88 @@ def process_water_from_image(image_path, lake_id, date_str, output_dir):
         mask_path = os.path.join(mask_dir, f"{lake_id}_{date_str}_mask.tif")
         mask_profile = profile.copy()
         mask_profile.update(dtype="uint8", count=1, nodata=0)
-        
-        final_water_mask = water_mask.astype(np.uint8)
-        
         with rasterio.open(mask_path, "w", **mask_profile) as dst:
-            dst.write(final_water_mask, 1)
+             dst.write(water_mask.astype(np.uint8), 1)
 
-        # Polygonize
-        shapes_gen = (
-            {"geometry": geom, "properties": {}}
-            for geom, val in shapes(final_water_mask, transform=profile["transform"])
-            if val == 1
-        )
+        # Save Mask as PNG for Frontend (RED MARGIN VIEW)
+        mask_png_filename = f"{lake_id}_{date_str}_mask_view.png"
+        mask_png_path = os.path.join(output_dir, mask_png_filename)
+        
+        plt.figure(figsize=(10, 10))
+        # Background: NDWI
+        plt.imshow(ndwi, cmap='gray', vmin=-0.5, vmax=0.5)
+        
+        # Overlay: Water Contours (Red Margin)
+        # We use contour to show the edge
+        plt.contour(water_mask, levels=[0.5], colors='red', linewidths=2)
+        
+        # Make water slightly blue shaded?
+        # Create clear overlay
+        overlay = np.zeros((water_mask.shape[0], water_mask.shape[1], 4))
+        overlay[water_mask == 1] = [0, 0, 1, 0.3] # Blue transparent
+        plt.imshow(overlay)
+        
+        plt.axis('off')
+        plt.savefig(mask_png_path, bbox_inches='tight', pad_inches=0, dpi=150)
+        plt.close()
 
-        geoms = list(shapes_gen)
-        if not geoms:
-            return {"area_ha": 0.0, "polygon_path": None, "mask_path": mask_path}
-
-        gdf = gpd.GeoDataFrame.from_features(geoms, crs=profile["crs"])
-        gdf["area_m2"] = gdf.area
-        gdf = gdf.sort_values("area_m2", ascending=False).head(1)
-
-        area_ha = float(gdf.area.iloc[0] / 10000)
-
-        poly_path = os.path.join(poly_dir, f"{lake_id}_{date_str}_water.geojson")
-        gdf.to_file(poly_path, driver="GeoJSON")
-
+        # Convert to Polygon
+        # Shapes returns generator of (geojson_geometry, value)
+        # We want value=1 (Water)
+        mask_uint8 = water_mask.astype(np.uint8)
+        shapes_gen = shapes(mask_uint8, mask=mask_uint8==1, transform=profile['transform'])
+        
+        polys = [shape(geom) for geom, val in shapes_gen if val == 1]
+        
+        if not polys: 
+             return {
+                 "area_ha": 0, 
+                 "polygon_path": None, 
+                 "mask_path": mask_path,
+                 "image_png": mask_png_filename
+             }
+        
+        # Merge multi-polygons
+        final_poly = unary_union(polys)
+        
+        gdf = gpd.GeoDataFrame({"geometry": [final_poly]}, crs=profile['crs'])
+        poly_out = os.path.join(poly_dir, f"{lake_id}_{date_str}.geojson")
+        gdf.to_file(poly_out, driver="GeoJSON")
+        
+        area_sqm = gdf.area.sum()
+        area_ha = area_sqm / 10000.0
+        
         return {
-            "area_ha": round(area_ha, 2),
-            "polygon_path": poly_path,
-            "mask_path": mask_path
+            "area_ha":  area_ha, 
+            "polygon_path": poly_out, 
+            "mask_path": mask_path,
+            "image_png": mask_png_filename
         }
 
 
 # ======================================================
 # DEM-BASED VOLUME
 # ======================================================
+    # ... imports 
+
+def log_to_file(msg):
+    try:
+        with open("debug_volume.log", "a") as f:
+            f.write(f"{datetime.now()}: {msg}\n")
+    except:
+        pass
+
 def calculate_lake_volume(dem_path, polygon_path, base_level=None, target_area_ha=None):
     # Note: polygon_path is now used only for CRS reference, not for clipping the DEM.
     # This ensures "Volume @ Base Level" refers to the full DEM capacity.
-    print(f"[DEBUG] Calculating Volume (Full Basin): DEM={os.path.basename(dem_path)}")
+    log_to_file(f"START Volume Calc: DEM={dem_path}, Target={target_area_ha}")
+    
     gdf = gpd.read_file(polygon_path)
-    print(f"[DEBUG] Ref CRS from Poly: {gdf.crs}")
+    # ... rest of code
+    
+    # ...
+    # Inside the function, replace prints with log_to_file or add both
+
     
     # Ensure Polygon is Projected (Metric) for accurate Volume
     # We FORCE a Metric CRS (UTM 44N) to guarantee pixel_area is in Meters.
@@ -337,24 +423,129 @@ def calculate_lake_volume(dem_path, polygon_path, base_level=None, target_area_h
              
         records.append({"elevation": lvl, "volume_m3": vol, "area_ha": area})
 
+    # Sort and create DataFrame
+    if not records:
+         return {"min_elevation": 0, "max_elevation": 0, "max_volume_m3": 0, "curve_df": pd.DataFrame()}
+
+    first_area_ha = records[0]["area_ha"]
+    min_elev = records[0]["elevation"]
+    
+    # Check if a custom "Floor" (Base Level) is provided by the user
+    # If base_level < min_elev, we use it as the zero-volume anchor.
+    # This respects the user's input to define the depth.
+    
+    custom_floor_applied = False
+    
+    if base_level is not None:
+        try:
+            floor_elev = float(base_level)
+            if floor_elev < min_elev - 0.1: # Significant difference
+                print(f"[INFO] Using User Base Level {floor_elev}m as Lake Floor (DEM Min: {min_elev}m)")
+                log_to_file(f"Using User Base Level {floor_elev} as Floor")
+                
+                # Extrapolate Volume from Floor to Min Elev
+                # Assume Conical/Pyramidal growth from Floor(0 area) to MinElev(first_area)
+                depth = min_elev - floor_elev
+                
+                # Volume of frustum/cone segment
+                # V = 1/3 * Area * Height
+                vol_offset = (1.0/3.0) * (first_area_ha * 10000.0) * depth
+                
+                msg = f"Extrapolating from {floor_elev}m to {min_elev}m. Added Volume: {vol_offset:.2f} m3"
+                print(msg)
+                log_to_file(msg)
+                
+                records.insert(0, {"elevation": floor_elev, "volume_m3": 0.0, "area_ha": 0.0})
+                
+                # Shift existing volumes
+                for rec in records[1:]:
+                    rec["volume_m3"] += vol_offset
+                    
+                custom_floor_applied = True
+        except:
+            pass
+
+    if not custom_floor_applied:
+        # Check for Flat Bottom / "Effective Floor" / Zero Volume Issue
+        # Scan for the first significant area (e.g., > 10 Ha)
+        # If the area jumps significantly (e.g. from <1 to >100), we infer a flat bottom.
+        
+        effective_floor_idx = -1
+        for i, rec in enumerate(records):
+            if rec["area_ha"] > 10.0: # Threshold for "significant lake start"
+                effective_floor_idx = i
+                break
+        
+        should_rectify = False
+        eff_floor_elev = min_elev
+        eff_floor_area = 0.0
+        
+        if effective_floor_idx != -1:
+            # We found a start. Check if it's a jump or valid start.
+            curr_area = records[effective_floor_idx]["area_ha"]
+            prev_area = records[effective_floor_idx-1]["area_ha"] if effective_floor_idx > 0 else 0.0
+            
+            if curr_area > 50.0 and prev_area < 5.0:
+                # Clear jump (e.g. 0.1 -> 590)
+                should_rectify = True
+                eff_floor_elev = records[effective_floor_idx]["elevation"]
+                eff_floor_area = curr_area
+                log_to_file(f"Detected Effective Lake Floor at {eff_floor_elev}m (Area Jump: {prev_area:.2f} -> {curr_area:.2f} Ha)")
+            elif effective_floor_idx == 0 and curr_area > 10.0:
+                # Starts big immediately
+                should_rectify = True
+                eff_floor_elev = min_elev
+                eff_floor_area = curr_area
+                
+        if should_rectify:
+             # Apply "Auto-Detected Base"
+             default_depth = 5.0
+             auto_floor = eff_floor_elev - default_depth
+             
+             log_to_file(f"Auto-Rectifying Zero Volume: Applying Default Floor at {auto_floor:.2f}m (5m below effective floor)")
+             
+             vol_offset = (1.0/3.0) * (eff_floor_area * 10000.0) * default_depth
+             
+             # Insert floor point
+             records.insert(0, {"elevation": auto_floor, "volume_m3": 0.0, "area_ha": 0.0})
+             
+             # Apply offset to all records at or above the effective floor
+             # Note: indices shifted by 1 after insert.
+             # We simply add volume to any record where elev >= eff_floor_elev? 
+             # Actually, simpler: just add to everything that was originally 'above' the floor.
+             # But the interpolation handles between auto_floor and eff_floor_elev.
+             # The existing records at eff_floor_elev needs the offset.
+             
+             for rec in records:
+                 if rec["elevation"] >= eff_floor_elev:
+                     rec["volume_m3"] += vol_offset
+        else:
+            log_to_file("No Lower Base Level provided and no flat bottom detected. Using DEM Min as Floor.")
+            records.insert(0, {"elevation": min_elev - 0.1, "volume_m3": 0.0, "area_ha": 0.0})
+
     df = pd.DataFrame(records)
+    log_to_file(f"Curve Data Head:\n{df.head().to_string()}")
+    
+    # Interp check
+    if target_area_ha is not None:
+         try:
+             current_vol = np.interp(target_area_ha, df['area_ha'], df['volume_m3'])
+             log_to_file(f"Interpolation: Target {target_area_ha} -> Vol {current_vol}")
+         except Exception as e:
+             log_to_file(f"Interp Error: {e}")
     
     if df.empty:
          print(f"[WARN] Volume Curve Empty. Min Elev: {min_elev}, Max: {max_elev}")
          return {"min_elevation": min_elev, "max_elevation": max_elev, "max_volume_m3": 0, "curve_df": df}
          
     final_max_vol = df['volume_m3'].max()
-    min_curve_area = df['area_ha'].min()
-    print(f"[DEBUG] Volume Curve Generated. Points: {len(df)}. Min Area: {min_curve_area:.2f} Ha, Max Vol: {final_max_vol:.2f} m3")
-    print(f"[DEBUG] Curve Head:\n{df.head()}")
-
+    min_curve_area = df['area_ha'].min() # Should be 0 now
+    
     # Interpolate for Base Level
     volume_at_base = 0
     if base_level is not None:
-         # Find closest or interp
          try:
              volume_at_base = np.interp(base_level, df['elevation'], df['volume_m3'])
-             print(f"[DEBUG] Base Level: {base_level} -> Vol: {volume_at_base}")
          except:
              volume_at_base = 0
 
@@ -364,51 +555,27 @@ def calculate_lake_volume(dem_path, polygon_path, base_level=None, target_area_h
     
     if target_area_ha is not None:
         try:
-             # We want to find Volume where Area = target_area_ha
-             # Since Area increases with Elevation, we can interp.
-             # x = area, y = volume
-             # Check if target area is within range
-             min_curve_area = df['area_ha'].min()
-             max_curve_area = df['area_ha'].max()
+             # Regular interpolation since we now have 0,0
+             # Note: df['area_ha'] is sorted? No, elevation is sorted. 
+             # Area generally increases with elevation, so it should be sorted.
+             # Let's clean up duplicates in area to be safe for interp (xp must be increasing)
              
-             print(f"[DEBUG] Target Area: {target_area_ha} Ha. Ref Curve Range: {min_curve_area:.2f} - {max_curve_area:.2f} Ha")
+             # Group by area to handle flats? 
+             # Simpler: just use interp, it handles it reasonable well if sorted.
+             # If multiple elevations have same area (vertical wall), interp is unpredictable.
+             # But here Area increases with Elev.
              
-             if target_area_ha > max_curve_area:
-                 print(f"[WARN] Target Area {target_area_ha} > Max Curve Area {max_curve_area}. Using Max Volume.")
-                 current_vol = final_max_vol
-                 detected_level = max_elev
-             elif target_area_ha <= min_curve_area:
-                 # Interpolate between 0 and smallest curve point
-                 print(f"[INFO] Target Area {target_area_ha} <= Min Curve Area {min_curve_area}. Interpolating down to 0.")
-                 
-                 # Problem: If min_curve_area corresponds to Vol=0, then we are interpolating 0 to 0.
-                 # If target_area is significant (e.g. 100 Ha), Vol=0 is misleading.
-                 # This happens if the DEM has a large flat bottom (Area > 0, Vol=0 at min_elev).
-                 # We can assume a slight depth for the 'first' layer of pixels if needed, or just accept.
-                 # Let's try to linearize from (0,0) to (MinArea, NextVol) instead of MinVol(0).
-                 
-                 if len(df) > 1:
-                     # Use the NEXT point to establish a slope
-                     next_area = df['area_ha'].iloc[1]
-                     next_vol = df['volume_m3'].iloc[1]
-                     # Slope = Vol / Area
-                     if next_area > 0:
-                        slope = next_vol / next_area
-                        current_vol = target_area_ha * slope # Linear approx
-                        # Also interp level
-                        next_elev = df['elevation'].iloc[1]
-                        detected_level = np.interp(target_area_ha, [0, next_area], [min_elev, next_elev])
-                     else:
-                        current_vol = 0
-                        detected_level = min_elev
-                 else:
-                     current_vol = 0
-                     detected_level = min_elev
+             current_vol = np.interp(target_area_ha, df['area_ha'], df['volume_m3'])
+             detected_level = np.interp(target_area_ha, df['area_ha'], df['elevation'])
+             
+             print(f"[DEBUG] Target: {target_area_ha} Ha -> Vol: {current_vol} m3 @ {detected_level} m")
 
-             else:
-                 current_vol = np.interp(target_area_ha, df['area_ha'], df['volume_m3'])
-                 detected_level = np.interp(target_area_ha, df['area_ha'], df['elevation'])
-                 print(f"[DEBUG] Interpolated Vol: {current_vol} m3 @ {detected_level} m")
+        except Exception as e:
+             # Fallback block removed as we simplified logic
+             print(f"[ERROR] Interpolation failed: {e}")
+             current_vol = 0.0
+                 
+
         except Exception as e:
             print(f"[ERROR] Interpolation failed: {e}")
             current_vol = 0.0
@@ -475,45 +642,35 @@ def generate_frequency_map(mask_paths, output_dir):
         print(f"[ERROR] Heatmap generation failed: {e}")
         return None
 
-def generate_comparison_plot(output_dir, lake_id, date_str, current_poly_path, ref_poly_path, dem_path=None):
+def generate_comparison_plot(output_dir, lake_id, date_str, current_poly_path, ref_poly_path, dem_path=None, suffix=""):
     """
-    Generates a plot showing the Reference Boundary (Red Outline) vs Current Water Spread (Blue Fill).
-    Background: DEM (if available) or Blank.
+    Generates a plot showing the Reference Boundary vs Current Water Spread.
     """
     try:
-        filename = f"{lake_id}_{date_str}_comparison.png"
+        filename = f"{lake_id}_{date_str}_comparison{suffix}.png"
         out_path = os.path.join(output_dir, filename)
         
         fig, ax = plt.subplots(figsize=(6, 6)) # Square aspect
         
-        # 1. Plot Background (DEM or White)
-        if dem_path and os.path.exists(dem_path):
-            with rasterio.open(dem_path) as src:
-                # We should really clip this to the polygon bounds, but plotting the whole thing is safer for context.
-                # If DEM is huge, this might be slow/ugly.
-                # For now, let's just assume we want context.
-                # Better: Plot the DEM but strictly zoomed to the Ref Polygon Bounds.
-                show(src, ax=ax, cmap='terrain', alpha=0.5)
-        else:
-            ax.set_facecolor('white')
+        # 1. Background (Clean White)
+        ax.set_facecolor('white')
             
-        # 2. Plot Reference Boundary (Red Outline)
+        # 2. Plot Reference Boundary (Base - Blue Outline)
         if ref_poly_path and os.path.exists(ref_poly_path):
             ref_gdf = gpd.read_file(ref_poly_path)
-            # Ensure CRS matches if we plotted DEM? 
-            # Assuming all are in same CRS or we accept mismatch for now (usually we handle reprojection).
-            # For purely visual, let's just plot.
-            ref_gdf.plot(ax=ax, facecolor='none', edgecolor='red', linewidth=2, label='Reference')
+            ref_gdf.plot(ax=ax, facecolor='none', edgecolor='blue', linewidth=2, linestyle='--', label='Base')
             
             # Zoom to reference bounds
             minx, miny, maxx, maxy = ref_gdf.total_bounds
             ax.set_xlim(minx - 500, maxx + 500)
             ax.set_ylim(miny - 500, maxy + 500)
 
-        # 3. Plot Current Water (Blue Fill)
+        # 3. Plot Current Water (Current - Red Contour)
         if current_poly_path and os.path.exists(current_poly_path):
              cur_gdf = gpd.read_file(current_poly_path)
-             cur_gdf.plot(ax=ax, color='blue', alpha=0.5, label='Current Water')
+             # Red Outline, Light Red Fill
+             cur_gdf.plot(ax=ax, facecolor='red', alpha=0.1) # Light fill
+             cur_gdf.plot(ax=ax, facecolor='none', edgecolor='red', linewidth=2, label='Current')
              
         ax.set_title(f"Spread Comparison: {date_str}")
         ax.axis('off') # Hide coords
@@ -531,6 +688,14 @@ import textwrap
 
 # ... [Keep previous imports]
 
+import time
+import matplotlib
+matplotlib.use('Agg') # Force non-interactive backend
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+# ...
+
 # ======================================================
 # COMPOSITE MAP V2 (Updated Legend)
 # ======================================================
@@ -542,7 +707,9 @@ def generate_composite_map_v2(output_dir, lake_id, all_polys, dem_path=None):
     try:
         if not all_polys: return None
         
-        filename = f"{lake_id}_composite_map.png"
+        # Timestamp to avoid browser caching
+        timestamp = int(time.time())
+        filename = f"{lake_id}_composite_map_{timestamp}.png"
         out_path = os.path.join(output_dir, filename)
         
         # Increase figure size for legend
@@ -558,6 +725,12 @@ def generate_composite_map_v2(output_dir, lake_id, all_polys, dem_path=None):
         # 2. Plot Polygons
         colors = plt.cm.jet(np.linspace(0, 1, len(all_polys)))
         
+        base_area = None
+        if len(all_polys) > 0:
+            base_area = all_polys[0]["area"]
+
+        legend_handles = []
+
         for idx, item in enumerate(all_polys):
             p_path = item["path"]
             p_date = item["date"]
@@ -568,18 +741,28 @@ def generate_composite_map_v2(output_dir, lake_id, all_polys, dem_path=None):
                 color = colors[idx]
                 
                 # Wrap long filename for legend
-                # Clean filename: remove run_id prefix if present? 
-                # Identifying run_id pattern might be tricky, let's just wrap.
-                clean_name = p_fname
+                clean_name = os.path.splitext(p_fname)[0] # Remove extension
                 if len(clean_name) > 20:
                      clean_name = "\n".join(textwrap.wrap(clean_name, 20))
                 
-                label_text = f"{p_date}\n{clean_name}\n({item['area']} Ha)"
+                # Relative Change Text
+                curr_area = item["area"]
+                rel_text = " (Base)"
+                if idx > 0 and base_area > 0:
+                     diff = ((curr_area - base_area) / base_area) * 100
+                     sign = "+" if diff > 0 else ""
+                     rel_text = f" ({sign}{diff:.1f}%)"
                 
-                # Plot Outline with Label
-                gdf.plot(ax=ax, facecolor='none', edgecolor=color, linewidth=2, label=label_text)
+                label_text = f"{clean_name}\n{p_date}\n{curr_area} Ha{rel_text}"
+                
+                # Plot Outline
+                gdf.plot(ax=ax, facecolor='none', edgecolor=color, linewidth=2)
                 # Fill with very low alpha
                 gdf.plot(ax=ax, color=color, alpha=0.1)
+                
+                # Create Custom Handle for Legend
+                patch = mpatches.Patch(facecolor=color, edgecolor=color, alpha=0.3, label=label_text)
+                legend_handles.append(patch)
 
         # Zoom to union bounds
         minx, miny, maxx, maxy = float('inf'), float('inf'), float('-inf'), float('-inf')
@@ -602,12 +785,12 @@ def generate_composite_map_v2(output_dir, lake_id, all_polys, dem_path=None):
         ax.set_title("Multi-Temporal Composite Analysis")
         
         # Legend outside the plot
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., fontsize='small')
+        lgd = ax.legend(handles=legend_handles, bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., fontsize='small')
         
         ax.axis('off')
         
-        plt.tight_layout()
-        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        # Save with extra artists (legend)
+        plt.savefig(out_path, dpi=150, bbox_extra_artists=(lgd,), bbox_inches='tight')
         plt.close(fig)
         return filename
         
@@ -616,10 +799,148 @@ def generate_composite_map_v2(output_dir, lake_id, all_polys, dem_path=None):
         return None
 
 
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm
+
+# ======================================================
+# 3D VOLUME VISUALIZATION
+# ======================================================
+def generate_3d_volume_map(output_dir, lake_id, level_data, dem_path, suffix=""):
+    """
+    Generates a 3D perspective view of the lake bed and water levels.
+    level_data: List of {"date": str, "level": float, "volume": float}
+    dem_path: Path to the DEM file
+    suffix: Optional suffix for filename
+    """
+    try:
+        if not dem_path or not os.path.exists(dem_path) or not level_data:
+            return None
+            
+        timestamp = int(time.time())
+        filename = f"{lake_id}_3d_volume_{timestamp}{suffix}.png"
+        out_path = os.path.join(output_dir, filename)
+
+        with rasterio.open(dem_path) as src:
+            # Read data
+            # We must downsample heavily for 3D plotting performance
+            # Target approx 100x100 grid or similar aspect ratio
+            
+            # Read low res
+            overview_factor = max(1, int(max(src.width, src.height) / 100))
+            data = src.read(1, out_shape=(1, int(src.height // overview_factor), int(src.width // overview_factor)))
+            
+            # Filter nodata
+            data = data.astype('float32')
+            data[data == src.nodata] = np.nan
+            data[data < -100] = np.nan # Basic filter
+            
+            # Create meshgrid for X, Y
+            rows, cols = data.shape
+            x = np.linspace(src.bounds.left, src.bounds.right, cols)
+            y = np.linspace(src.bounds.bottom, src.bounds.top, rows)
+            X, Y = np.meshgrid(x, y)
+            Z = data
+            
+        # Create Plot
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # 1. Plot Terrain (Lake Bed)
+        # Use a bathymetric colormap or terrain reversed
+        surf = ax.plot_surface(X, Y, Z, cmap=cm.terrain, linewidth=0, antialiased=False, alpha=0.6)
+        
+        # 2. Plot Water Planes
+        # Sort levels to handle transparency correctly (painters algo?)
+        # Matplotlib 3D transparency is tricky.
+        
+        # We pick distinct colors for dates
+        colors = ['blue', 'cyan', 'teal', 'navy']
+        if len(level_data) > len(colors):
+            colors = plt.cm.Blues(np.linspace(0.5, 1, len(level_data)))
+
+        # Find bounds for Z axis
+        z_min = np.nanmin(Z)
+        z_max = np.nanmax(Z)
+        
+        # To avoid clutter, maybe only plot the FIRST (Base) and LAST (Current)?
+        # Or all if few.
+        items_to_plot = level_data
+        
+        legend_proxies = []
+        
+        for idx, item in enumerate(items_to_plot):
+            lvl = item["level"]
+            date = item["date"]
+            vol = item.get("volume", 0)
+            
+            # Color
+            c = colors[idx % len(colors)]
+            
+            # Create a plane at Z = lvl
+            # We restrict the plane to where Z_terrain < lvl (i.e., inside the lake)
+            # or just plot a flat square for context? 
+            # Better: Plot flat square trimmed to axis bounds
+            
+            # Create a water surface array
+            # We can use the same X, Y
+            water_Z = np.full_like(Z, lvl)
+            
+            # Mask water where it's below terrain? (Technically water is ON TOP, but for vis we want to see the "fill")
+            # Usually we want to show the water surface. 
+            # Mask out where water_Z < Z (terrain sticks out)
+            water_Z[water_Z < Z] = np.nan
+            
+            ax.plot_surface(X, Y, water_Z, color=c, alpha=0.4, shade=False)
+            
+            # Cleanup Date for Legend (remove extension if passed as date/name)
+            # Actually level_data has 'date' which is date string.
+            # But just in case we add name data?
+            # For now, just use date.
+            
+            # If we want filename in 3D map legend? 
+            # The user asked: "legend sould be the lake file name wihtout he extension"
+            # Current 3D map uses 'date' for label. 
+            # I should update level_data to include filename.
+            
+            f_name_raw = item.get("filename", "")
+            clean_fname = os.path.splitext(f_name_raw)[0] if f_name_raw else date
+            
+            # Legend Entry
+            label = f"{clean_fname}: {lvl}m ({vol:.2f} TMC)"
+            legend_proxies.append(mpatches.Patch(color=c, alpha=0.4, label=label))
+            
+            z_max = max(z_max, lvl)
+
+        # Labels
+        ax.set_title("3D Volumetric Change Visualization")
+        ax.set_zlabel("Elevation (m)")
+        
+        # Adjust View
+        ax.view_init(elev=30, azim=-60)
+        
+        # Z Limits
+        # Default fallback (Reverted Zoom as per user request to show context)
+        min_z = np.nanmin(Z)
+        max_z = np.nanmax(Z)
+        ax.set_zlim(min_z, max(max_z, min_z + 20))
+        
+        # Legend with unique entries
+        ax.legend(handles=legend_proxies, loc='upper left', bbox_to_anchor=(0.0, 1.0), fontsize='small')
+
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=120)
+        plt.close(fig)
+        
+        return filename
+
+    except Exception as e:
+        print(f"[WARN] 3D Map failed: {e}")
+        return None
+
 # ======================================================
 # ORCHESTRATOR
 # ======================================================
-def analyze_lake(image_paths, dem_path, lake_id, date_string, output_dir, base_level=None):
+def analyze_lake(image_paths, dem_path, lake_id, date_string, output_dir, base_level=None, original_names=None):
     print(f"[DEBUG] Analysis Orchestrator: {len(image_paths)} images. DEM={dem_path}")
     
     dates = date_string.split(",") if date_string else []
@@ -631,7 +952,11 @@ def analyze_lake(image_paths, dem_path, lake_id, date_string, output_dir, base_l
     base_area = None # For relative percentage change
 
     for i, sat_path in enumerate(image_paths):
+        # Use original filename if provided, else basename
         filename = os.path.basename(sat_path)
+        if original_names and i < len(original_names):
+             filename = original_names[i]
+             
         print(f"[DEBUG] Processing Image {i+1}/{len(image_paths)}: {filename}")
         date_str = dates[i].strip() if i < len(dates) else datetime.now().strftime("%Y-%m-%d")
         
@@ -677,19 +1002,33 @@ def analyze_lake(image_paths, dem_path, lake_id, date_string, output_dir, base_l
                  curve_path = os.path.join(output_dir, f"{lake_id}_{date_str}_volume_curve.csv")
                  vol_res["curve_df"]["volume_tmc"] = vol_res["curve_df"]["volume_m3"] / 28316846.592
                  vol_res["curve_df"].to_csv(curve_path, index=False)
+
+            # Generate Individual 3D Map
+            vol_3d_map = None
+            if detected_level > 0:
+                single_level_data = [{
+                    "level": detected_level, 
+                    "volume": vol_tmc, 
+                    "date": date_str, 
+                    "filename": filename
+                }]
+                vol_3d_map = generate_3d_volume_map(output_dir, lake_id, single_level_data, dem_path, suffix=f"_img_{i}")
     
         final_res = {
             "id": f"{lake_id}_{i}",
             "date": date_str,
-            "filename": filename, # Return filename for frontend if needed
+            "filename": filename,
             "area_ha": round(area_ha, 2),
-            "pct_change": round(pct_change, 2), # New Field
+            "pct_change": round(pct_change, 2),
             "water_level": round(detected_level, 2),
             "volume_m3": round(volume_m3, 2),
             "volume_tmc": round(vol_tmc, 4),
             "min_elevation": round(elev_min, 2),
             "max_elevation": round(elev_max, 2),
-            "message": "Analysis successful"
+            "message": "Analysis successful",
+            "volume_map_3d": vol_3d_map,
+            "result_image": area_res.get("image_png"),
+            "polygon_path": poly
         }
         
         if volume_at_base is not None:
@@ -705,7 +1044,7 @@ def analyze_lake(image_paths, dem_path, lake_id, date_string, output_dir, base_l
         # Plot (Current vs Reference)
         if poly and reference_poly_path:
              print(f"[DEBUG] Generating Comparison Plot for {date_str}...")
-             comp_map = generate_comparison_plot(output_dir, lake_id, date_str, poly, reference_poly_path, dem_path)
+             comp_map = generate_comparison_plot(output_dir, lake_id, date_str, poly, reference_poly_path, dem_path, suffix=f"_img_{i}")
              if comp_map:
                  final_res["comparison_map"] = comp_map
         
@@ -716,7 +1055,11 @@ def analyze_lake(image_paths, dem_path, lake_id, date_string, output_dir, base_l
                 "area": area_ha,
                 "filename": filename # Pass filename for legend
             })
-            final_res["polygon_path"] = poly 
+            final_res["polygon_path"] = poly
+            
+        # Add the viewable mask image
+        if "image_png" in area_res:
+             final_res["result_image"] = area_res["image_png"] 
 
         results.append(final_res)
         
@@ -728,8 +1071,23 @@ def analyze_lake(image_paths, dem_path, lake_id, date_string, output_dir, base_l
             
     # Generate Composite Map (All in One)
     composite_file = generate_composite_map_v2(output_dir, lake_id, all_polygons, dem_path)
-    if composite_file:
+    
+    # Generate 3D Volume Map
+    level_list = []
+    for r in results:
+        if "water_level" in r and r["water_level"] > 0:
+            level_list.append({
+                "date": r["date"],
+                "level": r["water_level"],
+                "volume": r.get("volume_tmc", 0),
+                "filename": r.get("filename", "")
+            })
+            
+    volume_3d_file = generate_3d_volume_map(output_dir, lake_id, level_list, dem_path)
+    
+    if composite_file or volume_3d_file:
         for r in results:
-            r["composite_map"] = composite_file
+            if composite_file: r["composite_map"] = composite_file
+            if volume_3d_file: r["combined_volume_map"] = volume_3d_file
             
     return results

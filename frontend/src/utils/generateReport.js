@@ -80,16 +80,22 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
     let startX = margin;
 
     // Table Header
-    doc.setFillColor(241, 245, 249); // Slate-100
+    // Table Header
+    // doc.setFillColor(241, 245, 249); // Slate-100 -- Removing background for cleaner look? No, keep it.
+    doc.setFillColor(6, 182, 212); // Cyan-500 header
     doc.rect(margin, cursorY, pageWidth - (2 * margin), 10, 'F');
-    doc.setTextColor(15, 23, 42);
+    doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(10);
 
+    const headersTable = ["Date", "Spread Area (Ha)", "Volume (TMC)"];
+    let colWidthsTable = [60, 60, 60];
+    if (pageWidth > 200) colWidthsTable = [60, 60, 60]; // Simple fixed widths for A4
+
     let currentX = startX + 2;
-    headers.forEach((h, i) => {
+    headersTable.forEach((h, i) => {
         doc.text(h, currentX, cursorY + 7);
-        currentX += colWidths[i];
+        currentX += colWidthsTable[i];
     });
 
     cursorY += 10;
@@ -103,13 +109,9 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
             currentX = startX + 2;
             const date = res.date || `Dataset ${index + 1}`;
             const area = `${res.area_ha}`;
-            // User requested: "only area and capacity @40 as volume"
-            // So we show "volume_at_level_tmc" as the Volume column if available, 
-            // otherwise fallback to calculated volume if they didn't provide base level.
-            // But context implies they want the "Capacity" value there.
-            const vol = res.volume_at_level_tmc
-                ? `${res.volume_at_level_tmc}`
-                : `${res.volume_tmc}`;
+
+            // Fix: Use current volume to match dashboard
+            const vol = res.volume_tmc ? `${res.volume_tmc}` : "0.00";
 
             const rowData = [date, area, vol];
 
@@ -183,9 +185,139 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
         }
     };
 
-    await captureChart("#area-chart", "Area Trends");
-    await captureChart("#volume-chart", "Volume Capacity Trends");
+    // await captureChart("#area-chart", "Area Trends");
+    // await captureChart("#volume-chart", "Volume Capacity Trends"); 
 
+    // 6. Geospatial Maps
+    // Helper to add image from URL
+    const addRemoteImage = async (filename, title) => {
+        if (!filename) return;
+
+        if (cursorY + 120 > pageHeight - margin) {
+            doc.addPage();
+            cursorY = margin + 10;
+        }
+
+        cursorY = addSectionHeader(title, cursorY);
+
+        const imgUrl = `http://localhost:8000/outputs/${filename}`;
+
+        try {
+            // Load image using an Image object to get dimensions
+            const img = new Image();
+            img.src = imgUrl;
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+            });
+
+            // Calculate aspect ratio
+            const maxW = pageWidth - (2 * margin);
+            const maxH = 120; // Max height on page
+
+            let w = maxW;
+            let h = (img.height * w) / img.width;
+
+            if (h > maxH) {
+                h = maxH;
+                w = (img.width * h) / img.height;
+            }
+
+            // Center image
+            const x = (pageWidth - w) / 2;
+
+            doc.addImage(img, 'PNG', x, cursorY, w, h);
+            cursorY += h + 10;
+
+        } catch (err) {
+            console.warn(`Failed to verify/load image ${filename}`, err);
+        }
+    };
+
+    // Composite Map & Combined 3D Map
+    // if (results.length > 0 && results[0].composite_map) { ... }
+
+    // 3D Volume Map (Single Combined Map restored)
+    if (results.length > 0 && results[0].combined_volume_map) {
+        await addRemoteImage(results[0].combined_volume_map, "Multi-Temporal 3D Volumetric View");
+    }
+
+    // 7. Individual Analysis Breakdown
+    if (results.length > 0) {
+        doc.addPage();
+        cursorY = margin + 10;
+        cursorY = addSectionHeader("Detailed Analysis", cursorY);
+
+        for (const res of results) {
+            // Check usage
+            if (cursorY + 80 > pageHeight - margin) {
+                doc.addPage();
+                cursorY = margin + 10;
+            }
+
+            // Title
+            doc.setFontSize(10);
+            doc.setFont("helvetica", "bold");
+            doc.setTextColor(30);
+            doc.text(`${res.filename} (${res.date})`, margin, cursorY);
+            cursorY += 5;
+
+            // Stats Row
+            doc.setFontSize(9);
+            doc.setFont("helvetica", "normal");
+            const volText = res.volume_tmc ? `${res.volume_tmc} TMC` : "0 TMC";
+            const areaText = `${res.area_ha} Ha`;
+            doc.text(`Spread: ${areaText}   |   Volume: ${volText}`, margin, cursorY);
+            cursorY += 5;
+
+            // Image (Result Image or Verification Map)
+            const imgFile = res.comparison_map || res.result_image;
+            if (imgFile) {
+                const imgUrl = `http://localhost:8000/outputs/${imgFile}`;
+                try {
+                    const img = new Image();
+                    img.crossOrigin = "Anonymous";
+                    img.src = imgUrl;
+                    await new Promise((resolve, reject) => {
+                        img.onload = resolve;
+                        img.onerror = () => {
+                            // Try fallback to comparison map if result image fails?
+                            reject()
+                        };
+                    });
+
+                    const maxW = pageWidth - (2 * margin);
+                    const h = (img.height * maxW) / img.width;
+                    // Limit height
+                    let finalH = h;
+                    let finalW = maxW;
+
+                    if (finalH > 100) {
+                        finalH = 100;
+                        finalW = (img.width * finalH) / img.height;
+                    }
+
+                    doc.addImage(img, 'PNG', margin, cursorY, finalW, finalH);
+                    cursorY += finalH + 10;
+
+                } catch (e) {
+                    doc.text("[Image Unavailable]", margin, cursorY + 10);
+                    cursorY += 20;
+                }
+            } else {
+                cursorY += 5;
+            }
+
+
+
+            cursorY += 5; // Spacing
+
+            // Line separator
+            doc.setDrawColor(200);
+            doc.line(margin, cursorY, pageWidth - margin, cursorY);
+            cursorY += 10;
+        }
+    }
 
     // --- Footer ---
     // --- Footer & Watermark ---
@@ -198,7 +330,7 @@ export const generateReport = async (results, projectTitle = "Lake Kolavai (Defa
         // Footer
         doc.setFontSize(8);
         doc.setTextColor(150);
-        doc.text(`Generated by NeerPariksha AI | Page ${pageNo}`, margin, pageHeight - 10);
+        doc.text(`Generated by NeerPariksha | Page ${pageNo}`, margin, pageHeight - 10);
     };
 
     const pageCount = doc.getNumberOfPages();

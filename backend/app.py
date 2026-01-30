@@ -70,12 +70,14 @@ async def analyze(
     # Save satellite images
     # -----------------------------
     sat_paths = []
+    original_names = []
     for idx, file in enumerate(satellite):
         ext = os.path.splitext(file.filename)[1]
         sat_path = os.path.join(UPLOAD_DIR, f"{run_id}_sat_{idx}{ext}")
         with open(sat_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
         sat_paths.append(sat_path)
+        original_names.append(file.filename)
 
     # -----------------------------
     # Run pipeline
@@ -87,7 +89,8 @@ async def analyze(
             lake_id=run_id,
             date_string=dates,
             output_dir=OUTPUT_DIR,
-            base_level=base_level
+            base_level=base_level,
+            original_names=original_names
         )
         return results
 
